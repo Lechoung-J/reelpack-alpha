@@ -108,13 +108,6 @@ No more dragging the timeline hunting for the moment — you get one, two, three
 
 ---
 
-## A real example: "Shensi Wuji"
-
-A 252-second concept film, broken into **103 shots**, each with a **shot number + timecode** that can be looked up and cited.
-*"Shensi Wuji" (95th-anniversary concept film, China Academy of Art) · credited · derived data only.*
-
----
-
 ## Install
 
 ### Copy this to your AI
