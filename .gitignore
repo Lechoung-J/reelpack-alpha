@@ -1,0 +1,28 @@
+# Local runtime and build artifacts
+.venv*/
+.build/
+dist/
+.swiftpm/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+*.app
+*.dmg
+*.dSYM/
+DerivedData/
+Tools/macos_ocr/macos_ocr
+.local_library*/
+.local_reports*/
+media/
+models/
+
+# Credentials and machine state
+.env
+.env.*
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+.DS_Store
+.vscode/

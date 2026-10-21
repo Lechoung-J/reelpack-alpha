@@ -1,0 +1,6 @@
+# Optional native CPU environment (Intel / Apple Silicon); keep separate from the application environment.
+# Model implementation and bundled weights come from the pip package.
+transnetv2-pytorch==1.0.5
+torch==2.2.2
+numpy==1.26.4
+opencv-python==4.10.0.84
