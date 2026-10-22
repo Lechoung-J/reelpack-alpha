@@ -151,10 +151,6 @@ bash install.sh --archive Reelpack-0.2.0-arm64.zip \
 
 For an existing App, explicitly add `--replace-app` to make a backup before upgrading. Dependency repairs require a separate `--repair-env <name>` choice; custom Agent content is preserved. Bare `--version 0.2.0` maps to `v0.2.0`; the manifest records both product version and the real release tag.
 
-Or ask **your own Agent**:
-
-> "Install **Reelpack** for me, then read its SKILL.md."
-
 The installer provides [SKILL.md](SKILL.md) and concrete integration instructions for Claude Code, Codex and Cursor. When it detects a supported Agent's existing directory, it registers Reelpack's skill without replacing custom content; otherwise it shows how to add it manually. This does not install an MCP server.
 
 **Reelpack processes local video files only.** If you provide a link, your Agent (or you) first obtains the local file using its own capabilities; Reelpack does not download, scrape webpages or parse platform links.

@@ -149,10 +149,6 @@ bash install.sh --archive Reelpack-0.2.0-arm64.zip \
 
 已有 App 升级需显式加 `--replace-app`，会先备份。依赖修复另用 `--repair-env <name>`；Agent 自定义内容保留。裸版本 `--version 0.2.0` 映射到 `v0.2.0`，manifest 分别记录产品版本和真实 tag。
 
-或直接对你**自己的 Agent** 说一句：
-
-> 「帮我装 **Reelpack**，然后读取它的 SKILL.md。」
-
 安装后提供 [SKILL.md](SKILL.md) 和 Claude Code、Codex、Cursor 的明确接入指引。检测到受支持 Agent 的现有目录时，会注册 Reelpack 的技能；已有自定义内容不覆盖，否则提示手动接入。这一步不安装 MCP 服务。
 
 **Reelpack 只处理本地视频文件。** 用户给链接时，由用户的 Agent（或用户本人）先取成本地文件，再调用 Reelpack；引擎不下载、不抓取网页、不解析平台链接。
