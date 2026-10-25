@@ -16,6 +16,12 @@
 
 ---
 
+<p align="center">
+  <a href="https://youtu.be/njnzCSdBO14">
+    <img src="assets/concept-poster.jpg" alt="Reelpack concept film: AI can't watch video, it only reads text" width="760">
+  </a>
+</p>
+
 ## Understand it in 30 seconds
 
 Drop in a video, get back an **asset pack**:

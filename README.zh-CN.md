@@ -16,6 +16,12 @@
 
 ---
 
+<p align="center">
+  <a href="https://youtu.be/njnzCSdBO14">
+    <img src="assets/concept-poster.jpg" alt="Reelpack 概念片：AI 不能看视频，它只读文字" width="760">
+  </a>
+</p>
+
 ## 30 秒看懂
 
 丢一条片进去，出来一个**资产包**：
