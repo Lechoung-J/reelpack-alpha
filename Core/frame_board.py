@@ -61,15 +61,8 @@ def frame_board(store, asset_id, *, view='overview', shot=None, start=None, end=
                     width, height = image.size
             except Exception:
                 width = height = None
-        metadata = {'timestamp': target, 'relative_path': str(path.relative_to(package)),
-                    'absolute_path': str(path.resolve()), 'width': width, 'height': height,
-                    'resolution': f'{width}x{height}' if width and height else None, 'source': source}
-        analysis = store.get_asset(asset_id).get('analysis')
-        if analysis is not None:
-            details = [item for item in analysis.get('detail_frames', []) if abs(item.get('timestamp', -1) - target) > 0.001]
-            details.append(metadata)
-            analysis['detail_frames'] = details
-            store.save_analysis(asset_id, analysis)
+        # Detail lookup returns runtime metadata only. Saving the read-time
+        # migrated analysis here would change package bytes and stale supplements.
         item = {**evidence, 'relative_path': str(path.relative_to(package)),
                 'absolute_path': str(path.resolve()), 'width': width, 'height': height,
                 'resolution': f'{width}x{height}' if width and height else None, 'source': source}

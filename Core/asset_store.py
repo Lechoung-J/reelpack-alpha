@@ -257,6 +257,13 @@ class AssetStore:
     def get_asset(self, asset_id: str) -> dict[str, Any]:
         asset = self._read_json(self._asset_path(asset_id), "asset")
         analysis = self._read_json(self._analysis_path(asset_id), "analysis", optional=True)
+        if analysis is not None:
+            # Read-only migration: old packages gain explicit null region fields
+            # and an explicit not_run speakers block.
+            from ocr_regions import migrate_ocr_regions
+            from asset_contract import migrate_speakers
+            analysis = migrate_ocr_regions(analysis)
+            analysis = migrate_speakers(analysis)
         relative_media = asset.get("media", {}).get("relative_path")
         media_path = _safe_relative_path(self.root, relative_media) if relative_media else None
         result = {

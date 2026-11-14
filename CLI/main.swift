@@ -7,7 +7,7 @@ struct ReelpackCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "reelpack-cli",
         abstract: "Reelpack：分析本地视频并转写为 MD/PDF",
-        version: "0.2.0"
+        version: "0.2.2"
     )
 
     @Argument(help: "可读取的本地视频文件路径（支持 ~；--runtime-check 时无需输入）")
@@ -30,6 +30,12 @@ struct ReelpackCLI: AsyncParsableCommand {
 
     @Option(help: "原片 OCR 最大宽度；0 保留源分辨率")
     var ocrMaxWidth: Int = 1920
+
+    @Option(help: "OCR 采样画像：auto（默认）、ad、talk、podcast；由 Agent 查看预览后显式选择，不做内容分类")
+    var profile: String = "auto"
+
+    @Option(help: "实验性说话人分离：off（默认）或 auto；auto 需本地 CAM++ 模型，不自动下载")
+    var speakers: String = "off"
 
     @Option(help: "音乐后端：librosa 或显式 BYO panns；不会自动下载权重")
     var musicBackend: String = "librosa"
@@ -76,11 +82,13 @@ struct ReelpackCLI: AsyncParsableCommand {
             throw ValidationError("--model must be small or large (allowed: small|large).")
         }
         guard ["short", "film", "off"].contains(rewrite), ["auto", "macos", "ollama", "tesseract", "rapidocr"].contains(ocrBackend),
+              ["auto", "ad", "talk", "podcast"].contains(profile),
+              ["off", "auto"].contains(speakers),
               ["librosa", "panns"].contains(musicBackend), (0...8192).contains(ocrMaxWidth),
               ["none", "ollama", "cloud"].contains(summaryBackend),
               ["none", "ollama", "cloud"].contains(correctionBackend),
               genreThreshold.isFinite, (0...1).contains(genreThreshold), (1...10).contains(genreTopK) else {
-            throw ValidationError("后端、模型、OCR 宽度或曲风阈值参数无效。请查看 --help。")
+            throw ValidationError("后端、模型、OCR 宽度、画像或曲风阈值参数无效。请查看 --help。")
         }
         let rawPath = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawPath.isEmpty else {
@@ -107,16 +115,44 @@ struct ReelpackCLI: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        if runtimeCheck { RuntimeDiagnostics.exitIfRequested() }
+        // Standalone CLI environments are separate from the downloadable App.
+        // Respect an explicit runtime, including a checked read-only shared one.
+        if ProcessInfo.processInfo.environment["REELPACK_RUNTIME_ROOT"] == nil {
+            let root = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Reelpack/cli-runtime")
+                .appendingPathComponent(RuntimePaths.processArchitecture).path
+            setenv("REELPACK_RUNTIME_ROOT", root, 0)
+        }
+        if runtimeCheck {
+            var environment = ProcessInfo.processInfo.environment
+            environment["REELPACK_OUTPUT_ROOT"] = outputDir
+            if let libraryRoot { environment["REELPACK_LIBRARY_ROOT"] = libraryRoot }
+            let configuration = RuntimeConfiguration.resolve(environment: environment)
+            let report = RuntimeDiagnostics.check(configuration: configuration)
+            let encoded = try JSONEncoder().encode(report)
+            var object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            object["cli_version"] = "0.2.2"
+            if let resources = configuration.paths.resourcesRoot,
+               let data = try? Data(contentsOf: resources.appendingPathComponent("release-info.json")),
+               let build = try? JSONSerialization.jsonObject(with: data) {
+                object["build"] = build
+            } else {
+                object["build"] = ["version": "0.2.2", "source_commit": "unknown"]
+            }
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            throw ExitCode(report.exitCode)
+        }
         guard let input, let libraryRoot else { throw ValidationError("请输入本地视频文件路径。") }
         let runtime = RuntimeConfiguration.resolve()
         try runtime.validateForLaunch()
         let runner = ProcessRunner()
 
-        print("Reelpack CLI v0.2.0")
+        print("Reelpack CLI v0.2.2")
         print("输入: \(input)")
         print("资产库: \(libraryRoot)")
-        print("转录: faster-whisper \(model)；OCR: \(ocrBackend)；基础音频: librosa")
+        print("转录: faster-whisper \(model)；OCR: \(ocrBackend)；画像: \(profile)；基础音频: librosa")
         if musicBackend == "panns" { print("可选音乐标签: PANNs（需要 BYO 模型；缺少时会告知成本并保持未运行，不自动下载）") }
         if summaryBackend != "none" || correctionBackend != "none" || cloud {
             print("摘要/校正为显式选项；实际能力状态以完成摘要和 analysis.json 为准。")
@@ -135,6 +171,8 @@ struct ReelpackCLI: AsyncParsableCommand {
                     "--library-root", libraryRoot,
                     "--ocr-backend", ocrBackend,
                     "--ocr-max-width", String(ocrMaxWidth),
+                    "--profile", profile,
+                    "--speakers", speakers,
                     "--music-backend", musicBackend,
                     "--model", model,
                     "--language", language,

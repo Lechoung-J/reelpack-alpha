@@ -13,9 +13,44 @@ SIGNATURE_OPTIONS = {
 }
 
 
+PRODUCT_VERSION = '0.2.2'
+PIPELINE_REVISION = '0.2.2'
+
+
+def engine_provenance():
+    """Portable build identity for newly generated results, never read-time migration."""
+    result = {'product': 'Reelpack CLI', 'version': PRODUCT_VERSION,
+              'pipeline_revision': PIPELINE_REVISION, 'source_revision': 'unknown'}
+    try:
+        info = json.loads((Path(__file__).resolve().parent.parent / 'release-info.json').read_text())
+        commit = info.get('source_commit')
+        if isinstance(commit, str) and len(commit) == 40 and all(c in '0123456789abcdef' for c in commit):
+            result['source_revision'] = commit
+        if isinstance(info.get('source_dirty'), bool):
+            result['source_dirty'] = info['source_dirty']
+        tree = info.get('source_tree_sha256')
+        if isinstance(tree, str) and len(tree) == 64 and all(c in '0123456789abcdef' for c in tree):
+            result['source_tree_sha256'] = tree
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return result
+
+
 def run_signature(content_sha256, options):
     values = {name: getattr(options, name, default) if not isinstance(options, dict)
               else options.get(name, default) for name, default in SIGNATURE_OPTIONS.items()}
+    # Within this pipeline revision, an explicit non-default profile changes
+    # the signature; auto retains this revision's default cache behavior.
+    profile = (options.get('profile', 'auto') if isinstance(options, dict)
+               else getattr(options, 'profile', 'auto'))
+    if profile and profile != 'auto':
+        values['profile'] = profile
+    # Experimental speaker separation is opt-in; keeping 'off' out preserves
+    # signatures (and therefore cache reuse) for every existing request.
+    speakers = (options.get('speakers', 'off') if isinstance(options, dict)
+                else getattr(options, 'speakers', 'off'))
+    if speakers and speakers != 'off':
+        values['speakers'] = speakers
     def file_identity(value):
         if not value: return None
         path = Path(value).expanduser()
@@ -36,7 +71,7 @@ def run_signature(content_sha256, options):
         'rewrite_effective_model': (os.getenv('REELPACK_CLOUD_MODEL') or os.getenv('OPENAI_MODEL') or 'gpt-4o') if values['cloud'] else values['rewrite_model'],
         'rewrite_cloud_key_present': bool(os.getenv('OPENAI_API_KEY')) if values['cloud'] else False,
     }
-    payload = {'version': 2, 'pipeline_revision': '0.2.0', 'input_sha256': content_sha256, 'options': values,
+    payload = {'version': 2, 'pipeline_revision': PIPELINE_REVISION, 'input_sha256': content_sha256, 'options': values,
                'backend_context': backend_context}
     canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     return {**payload, 'digest': hashlib.sha256(canonical.encode()).hexdigest()}

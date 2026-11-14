@@ -81,7 +81,7 @@ def main():
         raise RuntimeError('required v3 App icon missing or invalid: Build/AppIcon.icns')
     shutil.copy2(icon, resources/'AppIcon.icns')
     (resources/'assets').mkdir()
-    for name in ['logo.png']:
+    for name in ['logo.png', 'concept-poster.jpg']:
         shutil.copy2(ROOT/'assets'/name, resources/'assets'/name)
     for name in ['install.sh', 'LICENSE', 'README.md', 'README.zh-CN.md', 'SKILL.md', 'RELEASE_NOTES.md']:
         if not (ROOT/name).is_file():

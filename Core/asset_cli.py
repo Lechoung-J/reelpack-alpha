@@ -98,17 +98,106 @@ def build_parser() -> argparse.ArgumentParser:
     review_cmd.add_argument("--interval", type=float, default=0.5)
     review_cmd.add_argument("--frames", type=int, help="前后各 N 个采样帧，覆盖 padding=N*interval")
 
+    motion_cmd = sub.add_parser(
+        "motion", help="只读测量显式时间范围的画面运动；--save 保存不可变引擎测量补充文档")
+    motion_cmd.add_argument("asset_id")
+    motion_cmd.add_argument("--start", type=float, required=True,
+                            help="范围起点（秒，必须为有限数）")
+    motion_cmd.add_argument("--end", type=float, required=True,
+                            help="范围终点（秒，必须大于 start；不隐式测量整片）")
+    motion_cmd.add_argument("--save", action="store_true",
+                            help="保存可用测量到 supplements/；失败不覆盖旧文档")
+    motion_cmd.add_argument("--sample-fps", type=float,
+                            help="沿用 motion_analyze 默认 8.0；范围 (0,240]")
+    motion_cmd.add_argument("--analysis-width", type=int,
+                            help="沿用 motion_analyze 默认 480；范围 64..1920")
+    motion_cmd.add_argument("--max-seconds", type=float,
+                            help="沿用 motion_analyze 默认 120.0；累计分析时长预算")
+    motion_cmd.add_argument("--smoothing-window", type=int,
+                            help="沿用 motion_analyze 默认 5；奇数化后 1..100000")
+    motion_cmd.add_argument("--head-tail", type=float,
+                            help="沿用 motion_analyze 默认 1.0；逐镜首尾窗口秒数")
+
+    annotate_cmd = sub.add_parser(
+        "annotate", help="写入带来源的 Agent 身份解释补充文档（不运行分类器）")
+    annotate_cmd.add_argument("asset_id")
+    annotate_cmd.add_argument("--input", required=True, help="reelpack.agent-annotations JSON 文件")
+
+    supplements_cmd = sub.add_parser(
+        "supplements", help="只读列出/读取补充文档及 current/stale/unknown 关系")
+    supplements_cmd.add_argument("asset_id")
+    supplements_cmd.add_argument("--id", help="只读取指定 supplement ID")
+
     validate_cmd = sub.add_parser("validate", help="校验资产包的结构化结果")
     validate_cmd.add_argument("asset_id")
     # Accept --library-root both before and after the subcommand for shell ergonomics.
-    for child in (import_cmd, sub.choices["list"], show_cmd, shots_cmd, query_cmd, frames_cmd, summary_cmd, validate_cmd, enrich_cmd, review_cmd):
+    for child in (import_cmd, sub.choices["list"], show_cmd, shots_cmd, query_cmd,
+                  frames_cmd, summary_cmd, validate_cmd, enrich_cmd, review_cmd,
+                  motion_cmd, annotate_cmd, supplements_cmd):
         child.add_argument("--library-root", dest="sub_library_root", default=None, help=argparse.SUPPRESS)
     return parser
+
+
+def _root_from_args(args):
+    return args.sub_library_root or args.library_root
+
+
+def _supplement_command(args):
+    """Dispatch the new commands before AssetStore can create any directory."""
+    if args.command == "motion":
+        from asset_motion import failure_result, run_motion
+        try:
+            result, code = run_motion(
+                _root_from_args(args), args.asset_id,
+                start=args.start, end=args.end,
+                sample_fps=args.sample_fps,
+                analysis_width=args.analysis_width,
+                max_seconds=args.max_seconds,
+                smoothing_window=args.smoothing_window,
+                head_tail_seconds=args.head_tail,
+                save=args.save)
+        except Exception as exc:  # explicit structured failure, never a traceback
+            from asset_motion import MotionCommandError
+            error = MotionCommandError("motion_failed", str(exc), status="failed")
+            result, code = failure_result(error), 4
+        _json(result)
+        if code:
+            reason = result.get("reason")
+            if not reason and isinstance(result.get("save"), dict):
+                reason = result["save"].get("reason")
+            if not reason and result.get("errors"):
+                reason = result["errors"][0].get("message")
+            print(f"Reelpack motion: {reason or 'measurement failed'}", file=sys.stderr)
+        return code
+
+    from asset_supplements import SupplementError, list_supplements, save_annotations
+    try:
+        if args.command == "annotate":
+            input_path = Path(args.input).expanduser()
+            if input_path.is_symlink() or not input_path.is_file():
+                raise SupplementError(f"注释输入不是普通文件：{input_path}")
+            try:
+                payload = json.loads(input_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise SupplementError(f"注释输入 JSON 无法读取：{input_path}") from exc
+            result = save_annotations(_root_from_args(args), args.asset_id, payload)
+        else:
+            result = list_supplements(_root_from_args(args), args.asset_id, args.id)
+    except (SupplementError, ValueError, OSError) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    _json(result)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command in {"motion", "annotate", "supplements"}:
+        # These commands validate the existing library themselves.  Constructing
+        # AssetStore here would create media/cache directories even for help-like
+        # or read-only invocations before validation.
+        return _supplement_command(args)
     store = AssetStore(args.sub_library_root or args.library_root)
     try:
         if args.command == "import":

@@ -59,12 +59,12 @@ class InstallerTierTests(unittest.TestCase):
         self.assertNotIn("A " + "second eye", first_line)
         self.assertIn("Reelpack 0.2.0", first_line)
 
-    def test_product_version_matches_repository_version(self):
+    def test_app_installer_stays_on_downloadable_app_version(self):
         installer_text = INSTALLER.read_text()
         match = re.search(r'^PRODUCT_VERSION="([^"]+)"', installer_text, re.MULTILINE)
         self.assertIsNotNone(match, "install.sh must define PRODUCT_VERSION")
-        repository_version = (ROOT / "VERSION").read_text().strip()
-        self.assertEqual(match.group(1), repository_version)
+        self.assertEqual(match.group(1), "0.2.0")
+        self.assertEqual((ROOT / "VERSION").read_text().strip(), "0.2.2")
 
     def test_missing_model_guidance_has_size_quality_and_no_silent_download(self):
         result = run_installer("--dry-run", "--non-interactive")

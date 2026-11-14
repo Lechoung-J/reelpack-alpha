@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from asset_store import _atomic_json_write, _safe_relative_path
 from asset_contract import assert_valid_analysis
+from ocr_conflicts import find_conflicts
 from pipeline_state import actionable
 
 DEFAULT_OCR = Path(__file__).resolve().parents[1] / 'Tools/macos_ocr/macos_ocr'
@@ -125,7 +126,8 @@ def enrich(store, asset_id, only=None, ocr=vision_ocr, summary=ollama_summary,
             with tempfile.TemporaryDirectory(prefix='reelpack-enrich-') as td:
                 for i, e in enumerate(evidence):
                     item = {'timestamp': e['timestamp'], 'start': e['timestamp'], 'end': e['timestamp'],
-                            'evidence_ids': [e['evidence_id']], 'text': ''}
+                            'evidence_ids': [e['evidence_id']], 'text': '',
+                            'region': None, 'region_norm': None}
                     try:
                         frame = _safe_relative_path(root, e['relative_path']) if e.get('relative_path') else Path(td)/f'{i}.jpg'
                         if not frame.is_file():
@@ -143,6 +145,8 @@ def enrich(store, asset_id, only=None, ocr=vision_ocr, summary=ollama_summary,
                      'sampling': {'strategy': 'existing_evidence_timestamps', 'timestamps': [e['timestamp'] for e in evidence]}}
             if errors:
                 value['reason'] = '; '.join(dict.fromkeys(errors))
+            analysis['ocr_conflicts'] = find_conflicts(
+                items, (analysis.get('transcript') or {}).get('raw_segments') or [])
         analysis[field] = value
         analysis.setdefault('capabilities', {})[field] = {'status': value['status'], 'backend': backend, 'model': model}
         if value.get('reason'):

@@ -1,4 +1,20 @@
-# Reelpack 0.2.0 — Alpha
+# Reelpack CLI 0.2.2 — Alpha
+
+Standalone CLI/source release **0.2.2** adds preview, profile selection, optional local CAM++ speaker clustering, explicit evidence review, motion measurements and attributed Agent supplements. The downloadable **App remains 0.2.0**. Use [CLI installation](docs/cli-install.md) and the explicit [v0.2.2 CLI Release](https://github.com/Lechoung-J/Reelpack-release/releases/tag/v0.2.2). This release contains no App bundle and does not update an installed App.
+
+- The standalone builder compiles `reelpack-cli` and the macOS Vision OCR helper only. It includes Core, pinned requirements, SKILL, licenses/NOTICE, version and portable per-file/source manifests. External SHA256 checksums cover the ZIP and installer.
+- The CLI installer validates archive paths and integrity before activating a complete version. It supports paths with spaces, retained versions, atomic selection, repeat installation and explicit rollback. The default CLI runtime is separate from the App runtime. Explicit `--existing-runtime` checks an existing Python 3.12 runtime read-only. Managed launchers/skills can be backed up and upgraded; custom entries are preserved. DSH joins Claude Code, Codex and Cursor registration. `--no-agent-register` preserves an absolute prefix command.
+- New analyses carry engine version 0.2.2 and a portable source revision when known. A new pipeline signature prevents 0.2.0 cache results from being presented as recomputed 0.2.2 output. Existing packages stay unchanged when read. Libraries can contain several engine versions.
+- Defaults remain `--profile auto` and `--speakers off`. Speaker clustering requires explicit `--speakers auto` and prepared local CAM++ weights; it does not recognize names. Agents associate voices, people and names using evidence and uncertainty. Explicit `annotate` saves these interpretations separately.
+- `motion` measures only an explicit time range. Results describe image-plane movement, not physical camera measurements or person trajectories. `--save` preserves an immutable measurement supplement. Reanalysis retains supplement history and marks relationships to the new analysis.
+
+Apple Silicon arm64 and macOS 14+ only. Native Python 3.12, five pinned environments and FFmpeg/ffprobe remain required. No new analysis stack or separate model download is introduced. Executables use ad-hoc signatures and are not notarized. Missing optional models produce explicit unavailable/not-run states; runtime metadata checks do not prove inference. Sparse frames do not establish lip-sync or identity accuracy.
+
+中文：0.2.2 仅发布 CLI 和源码，App 下载仍为 0.2.0。默认行为保持画像自动、说话人关闭。需要本地模型时请显式准备。人物关联仍由 Agent 依据证据判断。运动仅测指定区间，加 `--save` 才保存。安装、升级和回滚见 [CLI 安装说明](docs/cli-install.md)。
+
+---
+
+# Reelpack 0.2.0 — Alpha (history)
 
 **Status:** Alpha release, product 0.2.0 / Release tag v0.2.0. Assets are publicly downloadable.
 

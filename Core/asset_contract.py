@@ -2,9 +2,13 @@
 """Validation and construction helpers for the Agent Video v1 result contract."""
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 from asset_store import ANALYSIS_VERSION, SCHEMA_VERSION
+from ocr_regions import REGION_SUPPORT
+from pipeline_state import engine_provenance
 
 
 REQUIRED_TOP_LEVEL = {
@@ -22,12 +26,30 @@ REQUIRED_TOP_LEVEL = {
 }
 VALID_STATUS = {"complete", "partial", "failed", "unknown"}
 VALID_CAPABILITY_STATUS = {"complete", "partial", "failed", "not_run", "unknown"}
+SPEAKER_LABEL = re.compile(r"^S[1-9]\d*$")
+
+
+def _finite_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value)))
+
+
+def migrate_speakers(analysis):
+    """Read-time migration: old packages gain an explicit not_run speakers block.
+
+    This never rewrites the package on disk; only the returned analysis object
+    is completed, mirroring ``ocr_regions.migrate_ocr_regions``.
+    """
+    if isinstance(analysis, dict):
+        analysis.setdefault("speakers", {"status": "not_run"})
+    return analysis
 
 
 def empty_analysis(asset_id: str, source: dict[str, Any], video: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "analysis_version": ANALYSIS_VERSION,
+        "engine": engine_provenance(),
         "asset_id": asset_id,
         "status": "partial",
         "source": source,
@@ -46,12 +68,63 @@ def empty_analysis(asset_id: str, source: dict[str, Any], video: dict[str, Any] 
             "corrected_text": None,
             "correction": {"status": "not_run", "edits": []},
         },
-        "ocr": {"status": "not_run", "sampling": {}, "items": [], "reading_text": ""},
+        "ocr": {"status": "not_run", "sampling": {}, "items": [], "reading_text": "",
+                "region_support": dict(REGION_SUPPORT)},
+        "ocr_conflicts": [],
         "shots": {"status": "not_run", "items": []},
+        "content_hints": {
+            "shots_per_min": None,
+            "speech_ratio": None,
+            "ocr_change_rate": None,
+            "frame_board": None,
+            "duration_seconds": None,
+        },
         "evidence": [],
         "summary": {"status": "not_run", "text": ""},
         "uncertainties": [],
     }
+
+
+def _validate_speakers(speakers: Any, errors: list[str]) -> None:
+    """Optional experimental block: complete runs carry labelled speech segments."""
+    if not isinstance(speakers, dict):
+        errors.append("speakers 必须是 object")
+        return
+    status = speakers.get("status")
+    if status not in VALID_CAPABILITY_STATUS:
+        errors.append(f"speakers.status 必须是 {sorted(VALID_CAPABILITY_STATUS)} 之一")
+    for field in ("backend", "model"):
+        if speakers.get(field) is not None and not isinstance(speakers.get(field), str):
+            errors.append(f"speakers.{field} 必须是 string 或 null")
+    if "experimental" in speakers and not isinstance(speakers["experimental"], bool):
+        errors.append("speakers.experimental 必须是 boolean")
+    if status == "failed" and not speakers.get("reason"):
+        errors.append("speakers failed 缺少 reason")
+    confidence = speakers.get("confidence")
+    if confidence is not None and not isinstance(confidence, dict):
+        errors.append("speakers.confidence 必须是 object")
+    segments = speakers.get("segments")
+    if segments is None:
+        if status == "complete":
+            errors.append("speakers.segments 在 complete 时必须是 array")
+        return
+    if not isinstance(segments, list):
+        errors.append("speakers.segments 必须是 array")
+        return
+    for index, item in enumerate(segments):
+        if not isinstance(item, dict):
+            errors.append(f"speakers.segments[{index}] 必须是 object")
+            continue
+        start, end = item.get("start"), item.get("end")
+        if not _finite_number(start) or not _finite_number(end):
+            errors.append(f"speakers.segments[{index}] 缺少有效的 start/end")
+        elif float(end) < float(start):
+            errors.append(f"speakers.segments[{index}] end 不能小于 start")
+        speaker = item.get("speaker")
+        if speaker is not None and (not isinstance(speaker, str) or not SPEAKER_LABEL.match(speaker)):
+            errors.append(f"speakers.segments[{index}].speaker 必须是 S 编号字符串或 null")
+        if not isinstance(item.get("text", ""), str):
+            errors.append(f"speakers.segments[{index}].text 必须是 string")
 
 
 def validate_analysis(value: dict[str, Any]) -> list[str]:
@@ -110,6 +183,10 @@ def validate_analysis(value: dict[str, Any]) -> list[str]:
             if not isinstance(item.get("text", ""), str):
                 errors.append(f"transcript.raw_segments[{index}].text 必须是 string")
 
+    speakers = value.get("speakers")
+    if speakers is not None:
+        _validate_speakers(speakers, errors)
+
     ocr = value.get("ocr")
     if isinstance(ocr, dict):
         if not isinstance(ocr.get("items", []), list):
@@ -125,6 +202,45 @@ def validate_analysis(value: dict[str, Any]) -> list[str]:
                 errors.append(f"ocr.items[{index}] failed 缺少 reason")
             if item.get("start") is None and item.get("timestamp") is None:
                 errors.append(f"ocr.items[{index}] 缺少 timestamp 或 start")
+            if item.get("region") is not None and not isinstance(item.get("region"), dict):
+                errors.append(f"ocr.items[{index}].region 必须是 object 或 null")
+            if item.get("region_norm") is not None and not isinstance(item.get("region_norm"), dict):
+                errors.append(f"ocr.items[{index}].region_norm 必须是 object 或 null")
+        region_support = ocr.get("region_support")
+        if region_support is not None and not isinstance(region_support, dict):
+            errors.append("ocr.region_support 必须是 object")
+        sampling = ocr.get("sampling")
+        if isinstance(sampling, dict):
+            dropped = sampling.get("dropped")
+            if dropped is not None:
+                if not isinstance(dropped, list):
+                    errors.append("ocr.sampling.dropped 必须是 array")
+                else:
+                    for index, item in enumerate(dropped):
+                        if not isinstance(item, dict) or item.get("timestamp") is None or not item.get("reason"):
+                            errors.append(f"ocr.sampling.dropped[{index}] 必须有 timestamp 和 reason")
+                    if sampling.get("dropped_count") != len(dropped):
+                        errors.append("ocr.sampling.dropped_count 必须等于 dropped 长度")
+            count_keys = ("coarse_scans", "densified_frames", "total_ocr_frames", "dropped_count")
+            if all(isinstance(sampling.get(key), int) and not isinstance(sampling.get(key), bool)
+                   for key in count_keys):
+                if sampling["total_ocr_frames"] != (sampling["coarse_scans"]
+                                                    + sampling["densified_frames"]
+                                                    - sampling["dropped_count"]):
+                    errors.append("ocr.sampling 帧数不自洽: total != coarse + densified - dropped")
+
+    conflicts = value.get("ocr_conflicts")
+    if conflicts is not None:
+        if not isinstance(conflicts, list):
+            errors.append("ocr_conflicts 必须是 array")
+        else:
+            for index, item in enumerate(conflicts):
+                if not isinstance(item, dict):
+                    errors.append(f"ocr_conflicts[{index}] 必须是 object")
+                    continue
+                for key in ("start", "end", "ocr_text", "transcript_text", "similarity"):
+                    if key not in item:
+                        errors.append(f"ocr_conflicts[{index}] 缺少 {key}")
 
     shots = value.get("shots")
     if isinstance(shots, dict):

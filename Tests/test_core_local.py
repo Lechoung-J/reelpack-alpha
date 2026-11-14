@@ -173,6 +173,30 @@ class LocalPipelineTests(unittest.TestCase):
         self.assertEqual(analysis['transcript']['raw_segments'][0]['text'], 'synthetic speech')
         self.assert_no_external_work()
 
+    def test_speakers_auto_writes_labelled_segments_to_analysis(self):
+        state = {
+            'status': 'complete', 'backend': 'campp_sherpa_onnx+kmeans', 'model': 'stub.onnx',
+            'experimental': True,
+            'segments': [{'start': 1.0, 'end': 2.0, 'speaker': 'S1',
+                          'text': 'synthetic speech'}],
+            'confidence': {'selected_k': 1, 'silhouette': None},
+        }
+        with patch.object(core, '_analyze_speakers', return_value=state) as analyze:
+            core.main(self.arguments + ['--speakers', 'auto'])
+        analysis = json.loads(Path(self.completion()['analysis']).read_text())
+        self.assertEqual(analysis['speakers'], state)
+        self.assertEqual(validate_analysis(analysis), [])
+        self.assertEqual(analyze.call_args.args[1][0]['text'], 'synthetic speech')
+        self.assertEqual(analyze.call_args.args[2], 10.0)
+        self.assert_no_external_work()
+
+    def test_speakers_off_is_the_default_and_adds_no_field(self):
+        core.main(self.arguments)
+        analysis = json.loads(Path(self.completion()['analysis']).read_text())
+        self.assertNotIn('speakers', analysis)
+        self.assertEqual(validate_analysis(analysis), [])
+        self.assert_no_external_work()
+
     def test_complete_cached_package_emits_boolean_without_running_analysis(self):
         store = AssetStore(self.library)
         archive = store.import_file(self.source)

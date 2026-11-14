@@ -43,6 +43,13 @@ from asset_contract import empty_analysis
 from asset_store import AssetStore, sha256_file
 from pipeline_state import run_signature, reusable, annotate_analysis, summary_json
 from ocr_sampling import merge_observations, sampling_candidates
+from ocr_regions import REGION_SUPPORT, ensure_ocr_regions, image_size as ocr_image_size
+from ocr_conflicts import find_conflicts
+from subtitle_trigger import (DEFAULT_BAND, DEFAULT_CHANGED_PIXEL_COUNT,
+                              DEFAULT_CHANGED_PIXEL_DELTA, DEFAULT_MEAN_ABS_DIFF_THRESHOLD,
+                              DEFAULT_SIGNATURE_SIZE, band_signatures, count_signature_changes,
+                              duplicate_text_timestamps, extract_band_frames, subtitle_band_times,
+                              triggered_times_from_signatures)
 from shot_detect import detect_shots
 from audio_alignment import align_cuts_to_beats
 
@@ -57,6 +64,10 @@ try:
     from faster_whisper import WhisperModel
 except ImportError:  # Storage/query commands do not need Whisper.
     WhisperModel = None
+try:
+    import speaker_campp
+except ImportError:  # The experimental speaker switch reports failed, never crashes.
+    speaker_campp = None
 
 PROTOCOL_VERSION = 1
 
@@ -65,6 +76,27 @@ OLLAMA_BASE = "http://localhost:11434"
 FRAME_INTERVAL = 5  # seconds between keyframes
 MAX_FRAMES = 30
 FRAME_WIDTH = 1920  # OCR samples come from original media; cap width without upscaling
+# Per-profile coarse subtitle-band scan; ad is fast-paced, so it samples the
+# shortest interval.  auto is intentionally absent and keeps the legacy pass.
+PROFILE_COARSE_INTERVAL = {'talk': 30.0, 'podcast': 60.0, 'ad': 10.0}
+SUBTITLE_BAND = DEFAULT_BAND
+SUBTITLE_SIGNATURE_SIZE = DEFAULT_SIGNATURE_SIZE
+SUBTITLE_DENSIFY_WINDOW = 1.0
+SUBTITLE_DENSIFY_STEP = 0.5
+
+
+def _subtitle_trigger_params() -> dict:
+    """Tunable trigger thresholds, recorded in ``ocr.sampling.params``."""
+    return {
+        'trigger': 'subtitle_band_image',
+        'signature_size': list(SUBTITLE_SIGNATURE_SIZE),
+        'mean_abs_diff_threshold': DEFAULT_MEAN_ABS_DIFF_THRESHOLD,
+        'changed_pixel_delta': DEFAULT_CHANGED_PIXEL_DELTA,
+        'changed_pixel_count_threshold': DEFAULT_CHANGED_PIXEL_COUNT,
+        'densify_window': SUBTITLE_DENSIFY_WINDOW,
+        'densify_step': SUBTITLE_DENSIFY_STEP,
+        'text_comparison': 'dedupe_only',
+    }
 
 # ── NDJSON Output ──
 
@@ -221,6 +253,113 @@ def audio_track_absent(shots):
         result[name] = {'status': 'not_run', 'outcome': reason, 'reason': reason,
                         'impact': result['impact'], 'remedy': result['remedy']}
     return result
+
+
+# ── Experimental Speaker Separation (CAM++) ──
+
+def _speaker_state(status, *, backend=None, model=None, reason=None):
+    """Minimal, contract-valid speakers block for non-complete outcomes."""
+    state = {"status": status, "backend": backend, "model": model,
+             "experimental": True, "segments": [], "confidence": {}}
+    if reason:
+        state["reason"] = reason
+    return state
+
+
+def _speaker_segments(windows, segments, duration=None):
+    """Label transcript segments by the majority-overlap CAM++ window cluster.
+
+    Window and segment intervals are clamped to ``[0, duration]`` first; a
+    segment without any positive overlap keeps ``speaker=None`` instead of
+    guessing. Ties between clusters fall back to the lowest (earliest) label.
+    """
+    def bounds(item):
+        try:
+            start, end = float(item.get("start")), float(item.get("end"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if not math.isfinite(start) or not math.isfinite(end):
+            return None
+        if end < start:
+            start, end = end, start
+        if duration is not None:
+            start = max(0.0, min(float(duration), start))
+            end = max(0.0, min(float(duration), end))
+        else:
+            start = max(0.0, start)
+        return (start, end) if end > start else None
+
+    usable = []
+    for window in windows or []:
+        interval = bounds(window)
+        try:
+            cluster = int(window.get("cluster"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if interval is not None and cluster >= 0:
+            usable.append((interval[0], interval[1], cluster))
+
+    output = []
+    for segment in segments or []:
+        interval = bounds(segment)
+        if interval is None:
+            continue
+        start, end = interval
+        overlaps = {}
+        for window_start, window_end, cluster in usable:
+            overlap = min(end, window_end) - max(start, window_start)
+            if overlap > 0:
+                overlaps[cluster] = overlaps.get(cluster, 0.0) + overlap
+        speaker = None
+        if overlaps:
+            cluster = max(overlaps, key=lambda value: (overlaps[value], -value))
+            speaker = f"S{cluster + 1}"
+        output.append({"start": round(start, 3), "end": round(end, 3),
+                       "speaker": speaker, "text": str(segment.get("text") or "")})
+    return output
+
+
+def _analyze_speakers(video_path, segments, duration=None):
+    """Run CAM++ on a temporary 16 kHz mono WAV and map labels to segments.
+
+    Never raises and never downloads a model: a missing local model comes back
+    as ``not_run`` / ``model_missing``; every other failure carries ``reason``.
+    The temporary WAV is deleted when the block exits, before any result is used.
+    """
+    if speaker_campp is None:
+        return _speaker_state("failed", reason="speaker_campp unavailable")
+    try:
+        with tempfile.TemporaryDirectory(prefix="reelpack-speakers-") as temp_dir:
+            wav_path = Path(temp_dir) / "speaker-input.wav"
+            subprocess.run([
+                "ffmpeg", "-nostdin", "-v", "error", "-i", str(video_path),
+                "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le", "-y", str(wav_path),
+            ], check=True, capture_output=True, timeout=900)
+            result = speaker_campp.cluster_speakers(str(wav_path))
+    except Exception as exc:  # noqa: BLE001 - optional stage must not abort the package
+        detail = getattr(exc, "stderr", None) or str(exc)
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        return _speaker_state("failed", backend=speaker_campp.BACKEND,
+                              reason=f"{type(exc).__name__}: {str(detail)[-800:]}")
+
+    status = result.get("status", "failed")
+    confidence = result.get("confidence") or {}
+    state = _speaker_state(
+        status,
+        backend=result.get("backend") or speaker_campp.BACKEND,
+        model=(result.get("params") or {}).get("embedding_model"),
+        reason=result.get("reason"),
+    )
+    for key in ("selected_k", "silhouette"):
+        if confidence.get(key) is not None:
+            state["confidence"][key] = confidence[key]
+    if status == "failed" and not state.get("reason"):
+        state["reason"] = "speaker clustering failed without a reason"
+    if status == "complete":
+        state["segments"] = _speaker_segments(result.get("windows"), segments, duration)
+    return state
 
 
 # ── Frame Extraction ──
@@ -660,6 +799,116 @@ def _probe_video_metadata(video_path: str) -> dict:
         return {"duration_seconds": None, "width": None, "height": None, "fps": None, "codec": None}
 
 
+def _transcript_coverage_seconds(segments, duration: float):
+    """Union of transcribed intervals, clipped to the media duration."""
+    intervals = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start, end = float(segment.get("start")), float(segment.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end):
+            continue
+        if end < start:
+            start, end = end, start
+        start = max(0.0, min(duration, start))
+        end = max(0.0, min(duration, end))
+        if end > start:
+            intervals.append((start, end))
+    if not intervals:
+        return None
+    intervals.sort()
+    total = 0.0
+    current_start, current_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            total += current_end - current_start
+            current_start, current_end = start, end
+    total += current_end - current_start
+    return total
+
+
+def _ocr_text_entries(ocr_items) -> list[tuple[float, int, str]]:
+    """Non-empty OCR texts ordered by timestamp, with whitespace normalized."""
+    entries = []
+    for index, item in enumerate(ocr_items or []):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        timestamp = item.get("timestamp", item.get("start"))
+        try:
+            timestamp = float(timestamp)
+        except (TypeError, ValueError):
+            timestamp = float(index)
+        if not math.isfinite(timestamp):
+            timestamp = float(index)
+        entries.append((timestamp, index, " ".join(text.split())))
+    entries.sort(key=lambda entry: (entry[0], entry[1]))
+    return entries
+
+
+def compute_content_hints(shots=None, segments=None, ocr_items=None,
+                          duration_seconds=None, *, frame_board=None) -> dict:
+    """Evidence-only hints for downstream content-type judgment.
+
+    Missing or unusable inputs stay null; a failed computation is never
+    reported as a real zero. Only shots_per_min may legitimately be 0.0, and
+    only when shot detection completed and reported an empty list.
+    """
+    try:
+        duration = float(duration_seconds)
+        if not math.isfinite(duration) or duration <= 0:
+            duration = None
+    except (TypeError, ValueError):
+        duration = None
+
+    shots_per_min = None
+    if duration is not None and isinstance(shots, dict) and shots.get("status") == "complete":
+        items = shots.get("items")
+        if isinstance(items, list):
+            shots_per_min = round(len(items) / (duration / 60.0), 4)
+
+    speech_ratio = None
+    if duration is not None and isinstance(segments, list) and segments:
+        coverage = _transcript_coverage_seconds(segments, duration)
+        if coverage is not None:
+            speech_ratio = round(max(0.0, min(1.0, coverage / duration)), 4)
+
+    ocr_change_rate = None
+    entries = _ocr_text_entries(ocr_items) if isinstance(ocr_items, list) else []
+    if entries:
+        changes = sum(1 for previous, current in zip(entries, entries[1:])
+                      if previous[2] != current[2])
+        ocr_change_rate = round(changes / len(entries), 4)
+
+    return {
+        "shots_per_min": shots_per_min,
+        "speech_ratio": speech_ratio,
+        "ocr_change_rate": ocr_change_rate,
+        "frame_board": frame_board if isinstance(frame_board, str) and frame_board else None,
+        "duration_seconds": round(duration, 3) if duration is not None else None,
+    }
+
+
+def _existing_frame_board(archive) -> str | None:
+    """Record the package board only when it actually exists on disk."""
+    package_dir = (archive or {}).get("package_dir") if isinstance(archive, dict) else None
+    if not package_dir:
+        return None
+    try:
+        if (Path(package_dir) / "assets" / "frame-board.jpg").is_file():
+            return "assets/frame-board.jpg"
+    except OSError:
+        return None
+    return None
+
+
 def _ocr_items_from_lines(ocr_terms: str) -> list[dict]:
     items = []
     for index, line in enumerate(ocr_terms.splitlines()):
@@ -680,15 +929,224 @@ def _ocr_items_from_lines(ocr_terms: str) -> list[dict]:
     return items
 
 
+def _frame_size_map(frames) -> dict:
+    """Map exact sampling timestamps to decoded image sizes, for region_norm."""
+    sizes = {}
+    for timestamp, image in frames or []:
+        try:
+            sizes[round(float(timestamp), 6)] = ocr_image_size(image)
+        except (TypeError, ValueError):
+            continue
+    return sizes
+
+
+def _write_ocr_frames(frames, package_dir, evidence, start_index=0) -> dict:
+    """Persist OCR input frames as evidence and return timestamp -> evidence ids."""
+    refs = {}
+    for index, (timestamp, image) in enumerate(frames, start_index):
+        evidence_id = f"ocr_frame_{index:05d}"
+        relative = f"evidence/{evidence_id}.jpg"
+        target = Path(package_dir) / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(image)
+        evidence.append({"evidence_id": evidence_id, "kind": "image", "timestamp": timestamp,
+                         "relative_path": relative})
+        refs[timestamp] = [evidence_id]
+    return refs
+
+
+def _recognize_ocr(args, frames, refs) -> dict:
+    """Run the configured OCR backend once, normalizing every result shape."""
+    backend = args.ocr_backend
+    if backend in ("auto", "tesseract", "rapidocr"):
+        if backend == "auto":
+            from ocr_fallback import recognize_auto
+            ocr_bin = os.getenv('REELPACK_OCR_BIN', str(CORE_DIR.parent / 'Tools/macos_ocr/macos_ocr'))
+            def recognize(selected, references):
+                return recognize_auto(selected, references, ocr_bin,
+                                      ocr_model=args.vision_model, ollama_base=OLLAMA_BASE)
+        elif backend == "rapidocr":
+            from optional_backends import recognize_frames as recognize
+        else:
+            from ocr_tesseract import recognize_frames as recognize
+        return recognize(frames, refs)
+    if backend == "macos":
+        ocr_bin = os.getenv(
+            "REELPACK_OCR_BIN",
+            str(Path(__file__).resolve().parent.parent / "Tools/macos_ocr/macos_ocr"),
+        )
+        if not Path(ocr_bin).exists():
+            return {"status": "not_run", "backend": "macos", "model": "macOS Vision",
+                    "params": {}, "items": [], "errors": [],
+                    "reason": f"macOS OCR tool missing: {ocr_bin}", "attempted": False}
+        results, error = optional_macos_ocr(frames, ocr_bin)
+        items = [{"timestamp": timestamp, "start": timestamp, "end": timestamp, "text": text,
+                  "source": "frame_ocr", "evidence_ids": refs.get(timestamp, []),
+                  "uncertain": False}
+                 for timestamp, text in results if text.strip()]
+        return {"status": "failed" if error else "complete", "backend": "macos",
+                "model": "macOS Vision", "params": {}, "items": items,
+                "errors": [{"backend": "macos", "reason": error}] if error else [],
+                "reason": error, "attempted": True}
+    # Remaining backend: local Ollama vision model.
+    items, errors = [], []
+    for timestamp, image in frames:
+        description = describe_frame(image, args.vision_model)
+        if description and not description.startswith("(帧 OCR 失败"):
+            if description != "（无可见文字）":
+                items.append({"timestamp": timestamp, "start": timestamp, "end": timestamp,
+                              "text": description, "source": "ollama",
+                              "evidence_ids": refs.get(timestamp, []), "uncertain": False})
+        else:
+            errors.append({"backend": "ollama", "timestamp": timestamp, "reason": description})
+    status = "failed" if errors and len(errors) == len(frames) else ("partial" if errors else "complete")
+    return {"status": status, "backend": "ollama", "model": args.vision_model, "params": {},
+            "items": items, "errors": errors,
+            "reason": "; ".join(error["reason"] for error in errors) or None, "attempted": True}
+
+
+def _merge_ocr_results(results) -> dict:
+    """Combine coarse and densified OCR passes without losing provenance."""
+    results = [result for result in results if isinstance(result, dict)]
+    items, errors, attempts, probes = [], [], [], []
+    for result in results:
+        items.extend(result.get("items") or [])
+        errors.extend(result.get("errors") or [])
+        attempts.extend(result.get("attempts") or [])
+        probes.extend(result.get("probes") or [])
+    statuses = [result.get("status") for result in results]
+    if statuses and all(status == "complete" for status in statuses):
+        status = "complete"
+    elif any(status == "complete" for status in statuses):
+        status = "partial"
+    elif statuses and all(status == "not_run" for status in statuses):
+        status = "not_run"
+    else:
+        status = "failed"
+    backends = [result.get("backend") for result in results if result.get("backend")]
+    unique = list(dict.fromkeys(backends))
+    backend = "mixed" if len(unique) > 1 else (unique[0] if unique else None)
+    models = {result.get("backend"): result.get("model") for result in results if result.get("backend")}
+    merged = {"status": status, "backend": backend,
+              "model": models if len(unique) > 1 else models.get(backend),
+              "params": {"strategy": "subtitle_trigger", "phases": len(results)},
+              "items": items, "errors": errors, "attempted": True,
+              "reason": "; ".join(dict.fromkeys(result["reason"] for result in results
+                                                if result.get("reason"))) or None}
+    if attempts:
+        merged["attempts"] = attempts
+    if probes:
+        merged["probes"] = probes
+    fallback = next((result.get("fallback_from") for result in results
+                     if result.get("fallback_from")), None)
+    if fallback:
+        merged["fallback_from"] = fallback
+    return merged
+
+
+def _record_ocr_result(args, result) -> None:
+    args.ocr_result = result
+    args.ocr_attempted = bool(result.get("attempted", True))
+    args.ocr_observations = result.get("items") or []
+    args.ocr_error = result.get("reason") if result.get("status") != "complete" else None
+
+
+def _texts_by_timestamp(items) -> dict:
+    texts = {}
+    for item in items or []:
+        if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+            continue
+        timestamp = item.get("timestamp", item.get("start"))
+        try:
+            timestamp = round(float(timestamp), 6)
+        except (TypeError, ValueError):
+            continue
+        texts.setdefault(timestamp, []).append(item["text"])
+    return {timestamp: "\n".join(parts) for timestamp, parts in texts.items()}
+
+
+def _triggered_ocr(args, video_path, package_dir, evidence, duration):
+    """Two-pass profile OCR (ad/talk/podcast): coarse band scan then densified windows.
+
+    The coarse pass crops the bottom subtitle band and downscales each crop to
+    a small grayscale signature.  Consecutive signatures that differ schedule a
+    densified window; OCR text is compared only to de-duplicate identical
+    sentences (``duplicate_text_timestamps``), never as the trigger.
+
+    Every sampling point whose frame could not be decoded is listed in
+    ``dropped[]``; ``total_ocr_frames == coarse_scans + densified_frames -
+    dropped_count`` is the self-consistent coverage invariant (the two counts are
+    planned sampling points, not decoded frames).
+    """
+    interval = PROFILE_COARSE_INTERVAL[args.profile]
+    coarse_times = subtitle_band_times(video_path, interval=interval, band=SUBTITLE_BAND,
+                                       duration=duration)
+    dropped = []
+    coarse_frames = extract_band_frames(video_path, coarse_times, band=SUBTITLE_BAND,
+                                        max_width=args.ocr_max_width, dropped=dropped)
+    signatures = band_signatures(coarse_frames, size=SUBTITLE_SIGNATURE_SIZE)
+    coarse_refs = _write_ocr_frames(coarse_frames, package_dir, evidence)
+    coarse_result = _recognize_ocr(args, coarse_frames, coarse_refs)
+    texts = _texts_by_timestamp(coarse_result.get("items"))
+    texts_by_timestamp = {round(float(timestamp), 6): texts.get(round(float(timestamp), 6), "")
+                          for timestamp, _ in coarse_frames}
+    triggered_changes = count_signature_changes(signatures)
+    duplicates = duplicate_text_timestamps(signatures, texts_by_timestamp)
+    densified = triggered_times_from_signatures(
+        signatures, window=SUBTITLE_DENSIFY_WINDOW, step=SUBTITLE_DENSIFY_STEP,
+        duration=duration, existing=[timestamp for timestamp, _ in coarse_frames],
+        skip_timestamps=duplicates)
+    dense_frames = []
+    if densified:
+        # A wholly failed densified pass must not discard the coarse OCR result;
+        # its sampling points are reported in dropped[] instead of silently lost.
+        try:
+            dense_frames = extract_band_frames(video_path, densified, band=SUBTITLE_BAND,
+                                               max_width=args.ocr_max_width, dropped=dropped)
+        except RuntimeError:
+            dense_frames = []
+    dense_refs = _write_ocr_frames(dense_frames, package_dir, evidence,
+                                   start_index=len(coarse_frames))
+    dense_result = _recognize_ocr(args, dense_frames, dense_refs) if dense_frames else None
+    result = _merge_ocr_results([coarse_result, dense_result] if dense_result else [coarse_result])
+    frames = coarse_frames + dense_frames
+    dropped.sort(key=lambda item: item["timestamp"])
+    sampling = {
+        "strategy": "subtitle_trigger",
+        "profile": args.profile,
+        "coarse_interval": int(interval) if float(interval).is_integer() else interval,
+        "coarse_scans": len(coarse_times),
+        "triggered_changes": triggered_changes,
+        "text_deduplicated_changes": len(duplicates),
+        "densified": len(densified),
+        "densified_frames": len(densified),
+        "total_ocr_frames": len(frames),
+        "dropped": dropped,
+        "dropped_count": len(dropped),
+        "band": SUBTITLE_BAND,
+        "params": _subtitle_trigger_params(),
+        "coarse_timestamps": [timestamp for timestamp, _ in coarse_frames],
+        "densified_timestamps": [timestamp for timestamp, _ in dense_frames],
+        "frame_source": "original_media_subtitle_band",
+        "max_width": args.ocr_max_width,
+        "jpeg_quality": 95,
+        "executed_frame_count": len(frames),
+        "executed_timestamps": [timestamp for timestamp, _ in frames],
+        "independent_sampling": False,
+    }
+    return result, sampling, frames
+
+
 def _save_pipeline_analysis(store: AssetStore, archive: dict, input_ref: str, video_path: str,
                             segments: list[dict], raw_transcript: str, corrected: str,
                             ocr_terms: str, summary: str, args, *, shots: dict | None = None,
                             evidence: list[dict] | None = None, ocr_sampling_info: dict | None = None,
                             transcription_info: dict | None = None, music: dict | None = None) -> dict:
+    video_metadata = _probe_video_metadata(video_path)
     analysis = empty_analysis(
         archive["asset_id"],
         {"kind": "local_file", "reference": None},
-        _probe_video_metadata(video_path),
+        video_metadata,
     )
     # Package-level completeness and reuse are independent: optional not_run/failed
     # statuses remain truthful, while a matching run can reuse completed core work.
@@ -741,21 +1199,38 @@ def _save_pipeline_analysis(store: AssetStore, archive: dict, input_ref: str, vi
     }
     if getattr(args, 'rewrite_result', None) is not None:
         analysis['transcript']['rewrite'] = copy.deepcopy(args.rewrite_result)
+    # Absent unless --speakers auto ran, which keeps --speakers off byte-stable.
+    if getattr(args, 'speakers_result', None) is not None:
+        analysis['speakers'] = copy.deepcopy(args.speakers_result)
     raw_ocr_items = getattr(args, "ocr_observations", None)
     if raw_ocr_items is None:
         raw_ocr_items = _ocr_items_from_lines(ocr_terms)
+    raw_ocr_items = ensure_ocr_regions(raw_ocr_items,
+                                       getattr(args, "ocr_frame_sizes", None))
     merged_ocr = merge_observations(raw_ocr_items)["items"] if raw_ocr_items else []
     analysis["ocr"] = {
         "status": "complete" if ocr_terms else "unknown",
-        "sampling": ocr_sampling_info or {"strategy": "independent_interval", "interval_seconds": FRAME_INTERVAL, "independent_sampling": True},
+        # A null region means "this backend does not report coordinates", not a
+        # failed implementation; see ocr_regions.REGION_SUPPORT.
+        "region_support": dict(REGION_SUPPORT),
+        "sampling": ocr_sampling_info or {"strategy": "independent_interval", "interval_seconds": FRAME_INTERVAL, "independent_sampling": True,
+                                          "dropped": [], "dropped_count": 0},
         "items": merged_ocr,
         "reading_text": "\n".join(item["text"] for item in merged_ocr),
         "reading_reconstruction": merge_observations(raw_ocr_items)["reading_reconstruction"] if raw_ocr_items else {"status": "not_run"},
     }
+    analysis["ocr_conflicts"] = find_conflicts(merged_ocr, segments)
     if getattr(args, "ocr_attempted", False) and not getattr(args, "ocr_error", None):
         analysis["ocr"]["status"] = "complete"
         analysis["capabilities"]["ocr"]["status"] = "complete"
     analysis["shots"] = shots or {"status": "not_run", "items": []}
+    analysis["content_hints"] = compute_content_hints(
+        shots=analysis["shots"],
+        segments=segments,
+        ocr_items=merged_ocr,
+        duration_seconds=video_metadata.get("duration_seconds"),
+        frame_board=_existing_frame_board(archive),
+    )
     analysis["music"] = music or {"status":"not_run", "experimental":True}
     transcription_state = getattr(args, 'transcription_state', None)
     if transcription_state is not None:
@@ -820,6 +1295,10 @@ def main(argv=None):
     parser.add_argument("--music-backend", choices=["librosa", "panns"], default="librosa", help="可选音乐语义旁路；默认保留 librosa")
     parser.add_argument("--ocr-backend", choices=["auto", "macos", "ollama", "tesseract", "rapidocr"], default="auto", help="OCR 后端（默认 auto）")
     parser.add_argument("--ocr-max-width", type=int, default=FRAME_WIDTH, help="原片 OCR 帧宽度上限（默认 1920；0 保留原分辨率，不放大低分辨率源）")
+    parser.add_argument("--profile", choices=["auto", "ad", "talk", "podcast"], default="auto",
+                        help="OCR 采样配置：auto 保持旧行为；ad 10s 粗扫+字幕触发；talk 30s 粗扫+触发；podcast 60s 粗扫+触发")
+    parser.add_argument("--speakers", choices=["off", "auto"], default="off",
+                        help="实验性说话人分离：off（默认，保持旧结果）；auto 需本地 CAM++ 模型（REELPACK_SPEAKER_MODEL），不自动下载")
     parser.add_argument('--rewrite', choices=['short', 'film', 'off'], default='off', help='默认off；显式short或film开启语义整理，原文始终保留')
     parser.add_argument('--rewrite-model', default='qwen2.5:7b', help='本地Ollama整理模型，须已准备；不自动下载')
     parser.add_argument("--summary-backend", choices=["none", "ollama", "cloud"], default="none", help="默认交由下游 Agent；本地摘要需显式启用")
@@ -958,6 +1437,19 @@ def main(argv=None):
         raw_transcript = "\n".join(
             f"[{_fmt_ts(s['start'])}-{_fmt_ts(s['end'])}] {s['text']}" for s in segments)
         corrected = raw_transcript
+        # Experimental and default-off: only 'auto' writes analysis.speakers.
+        if args.speakers == 'auto':
+            if args.audio_track['present']:
+                emit_progress('speakers', 79, '实验性说话人分离（CAM++）；仅使用本地模型，不下载')
+                args.speakers_result = _analyze_speakers(video_path, segments, duration)
+                if args.speakers_result.get('status') == 'complete':
+                    emit_progress('speakers', 79,
+                                  f"说话人分离完成 ({args.speakers_result['confidence'].get('selected_k', '?')} 组)")
+                else:
+                    emit_progress('speakers', 79, '说话人分离未完成：' +
+                                  str(args.speakers_result.get('reason', 'unknown')))
+            else:
+                args.speakers_result = _speaker_state('not_run', reason='no_audio_track')
         checkpoint('transcription')
 
         from frame_sampling import mark_speech_frames
@@ -967,77 +1459,68 @@ def main(argv=None):
         ocr_terms_parts = []
 
         if is_video:
-            emit_progress("transcribe", 80, "正在提取关键帧...")
-            frames = extract_frames(video_path, max_width=args.ocr_max_width)
-            ocr_sampling_info.update(
-                frame_source="original_media", max_width=args.ocr_max_width, jpeg_quality=95,
-                executed_frame_count=len(frames), executed_timestamps=[ts for ts, _ in frames],
-            )
-
-            if frames:
-                ocr_backend = args.ocr_backend
-                if ocr_backend in ("auto", "tesseract", "rapidocr"):
-                    if ocr_backend == "auto":
-                        from ocr_fallback import recognize_auto
-                        ocr_bin = os.getenv('REELPACK_OCR_BIN', str(CORE_DIR.parent / 'Tools/macos_ocr/macos_ocr'))
-                        def recognize_frames(selected, references):
-                            return recognize_auto(selected, references, ocr_bin, ocr_model=args.vision_model, ollama_base=OLLAMA_BASE)
+            profile = getattr(args, "profile", "auto") or "auto"
+            frames = []
+            if profile in PROFILE_COARSE_INTERVAL:
+                emit_progress("transcribe", 80, "正在字幕带粗扫并按变化加密...")
+                try:
+                    ocr_result, ocr_sampling_info, frames = _triggered_ocr(
+                        args, video_path, archive["package_dir"], evidence, duration)
+                except Exception as exc:
+                    emit_progress("transcribe", 80, "字幕带采样失败，未运行 OCR：" + str(exc))
+                    ocr_result = {"status": "failed", "backend": args.ocr_backend,
+                                  "model": None, "params": {}, "items": [], "errors": [],
+                                  "reason": str(exc), "attempted": True}
+                    interval = PROFILE_COARSE_INTERVAL[profile]
+                    failed_dropped = [item for item in getattr(exc, "dropped", []) or []
+                                      if isinstance(item, dict)]
+                    # A failed pass still reports every sampling point that was
+                    # attempted and dropped, so coverage stays auditable.
+                    attempted = getattr(exc, "attempted", len(failed_dropped)) or 0
+                    ocr_sampling_info = {
+                        "strategy": "subtitle_trigger", "profile": profile,
+                        "coarse_interval": int(interval) if float(interval).is_integer() else interval,
+                        "coarse_scans": int(attempted),
+                        "triggered_changes": 0, "text_deduplicated_changes": 0,
+                        "densified": 0, "densified_frames": 0,
+                        "total_ocr_frames": 0,
+                        "dropped": failed_dropped, "dropped_count": len(failed_dropped),
+                        "band": SUBTITLE_BAND, "params": _subtitle_trigger_params(),
+                        "status": "failed",
+                        "reason": str(exc), "executed_frame_count": 0,
+                        "executed_timestamps": [], "independent_sampling": False,
+                    }
+                args.ocr_frame_sizes = _frame_size_map(frames)
+                _record_ocr_result(args, ocr_result)
+            else:
+                emit_progress("transcribe", 80, "正在提取关键帧...")
+                frames = extract_frames(video_path, max_width=args.ocr_max_width)
+                ocr_sampling_info.update(
+                    frame_source="original_media", max_width=args.ocr_max_width, jpeg_quality=95,
+                    dropped=[], dropped_count=0,
+                    executed_frame_count=len(frames), executed_timestamps=[ts for ts, _ in frames],
+                )
+                args.ocr_frame_sizes = _frame_size_map(frames)
+                if frames:
+                    if args.ocr_backend == "auto":
                         emit_progress('transcribe', 82, '正在 OCR 识别（auto：macOS Vision，异常时使用本地 RapidOCR）')
-                    elif ocr_backend == "rapidocr":
-                        from optional_backends import recognize_frames
-                    else:
-                        from ocr_tesseract import recognize_frames
-                    refs = {}
-                    for index, (ts, img_bytes) in enumerate(frames):
-                        eid = f"ocr_frame_{index:05d}"
-                        relative = f"evidence/{eid}.jpg"
-                        target = Path(archive["package_dir"]) / relative
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(img_bytes)
-                        evidence.append({"evidence_id": eid, "kind": "image", "timestamp": ts,
-                                         "relative_path": relative})
-                        refs[ts] = [eid]
-                    ocr_result = recognize_frames(frames, refs)
-                    args.ocr_result = ocr_result
-                    args.ocr_attempted = True
-                    args.ocr_observations = ocr_result["items"]
-                    args.ocr_error = ocr_result.get("reason") if ocr_result['status'] != 'complete' else None
-                    if ocr_result.get('fallback_from'):
-                        emit_progress('transcribe', 84, 'OCR 已回退至 ' + str(ocr_result['backend']) + '：' + str(ocr_result.get('reason', '原生后端异常')))
-                    for item in ocr_result["items"]:
-                        if item.get('text'):
-                            ocr_terms_parts.append(f"[{_fmt_ts(item['timestamp'])}] {item['text']}")
-                elif ocr_backend == "macos":
-                    ocr_bin = os.getenv(
-                        "REELPACK_OCR_BIN",
-                        str(Path(__file__).resolve().parent.parent / "Tools/macos_ocr/macos_ocr"),
-                    )
-                    if not Path(ocr_bin).exists():
-                        # Keep the capability truthful and let the rest of the package complete.
-                        emit_progress("transcribe", 82, "macOS OCR 工具缺失，跳过 OCR")
-                        args.ocr_error = f"macOS OCR tool missing: {ocr_bin}"
-                        ocr_results = []
-                    else:
+                    elif args.ocr_backend == "macos":
                         emit_progress("transcribe", 82, "正在 OCR 识别 (macOS Vision)...")
-                        ocr_results, args.ocr_error = optional_macos_ocr(frames, ocr_bin)
-                        args.ocr_attempted = True
-                        args.ocr_observations = [
-                            {"timestamp": ts, "start": ts, "end": ts, "text": text,
-                             "source": "frame_ocr", "evidence_ids": [], "uncertain": False}
-                            for ts, text in ocr_results if text.strip()
-                        ]
-                        if args.ocr_error:
-                            emit_progress("transcribe", 82, args.ocr_error)
-                    for ts, desc in ocr_results:
-                        if desc.strip():
-                            ocr_terms_parts.append(f"[{_fmt_ts(ts)}] {desc}")
-                else:
-                    vision_model = args.vision_model
-                    emit_progress("transcribe", 82, f"正在 OCR 识别 ({vision_model})...")
-                    for ts, img_bytes in frames:
-                        desc = describe_frame(img_bytes, vision_model)
-                        if desc and not desc.startswith("(帧 OCR 失败") and desc != "（无可见文字）":
-                            ocr_terms_parts.append(f"[{_fmt_ts(ts)}] {desc}")
+                    elif args.ocr_backend not in ("tesseract", "rapidocr"):
+                        emit_progress("transcribe", 82, f"正在 OCR 识别 ({args.vision_model})...")
+                    refs = _write_ocr_frames(frames, archive["package_dir"], evidence)
+                    ocr_result = _recognize_ocr(args, frames, refs)
+                    _record_ocr_result(args, ocr_result)
+                    if args.ocr_backend == "macos" and not ocr_result.get("attempted"):
+                        emit_progress("transcribe", 82, "macOS OCR 工具缺失，跳过 OCR")
+                    elif ocr_result.get("fallback_from"):
+                        emit_progress('transcribe', 84, 'OCR 已回退至 ' + str(ocr_result.get('backend')) + '：' + str(ocr_result.get('reason', '原生后端异常')))
+                    elif ocr_result.get("status") == "failed" and ocr_result.get("reason"):
+                        emit_progress("transcribe", 82, str(ocr_result["reason"]))
+
+            for item in getattr(args, "ocr_observations", None) or []:
+                if item.get("text") and item.get("timestamp") is not None:
+                    ocr_terms_parts.append(f"[{_fmt_ts(item['timestamp'])}] {item['text']}")
 
             # Free frame data from memory
             del frames

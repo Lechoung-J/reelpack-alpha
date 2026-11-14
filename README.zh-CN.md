@@ -104,6 +104,8 @@ Reelpack 不想再做"一段 AI 摘要"——那还是隔着一层。
 
 > 案例：一条二十分钟的剪辑教程。最后拿到的不是"看完了"，而是一份带时间点的步骤清单。
 
+访谈和播客里，Agent 可依据截图将声音与人物关联。证据不足时，可补取帧或回查短片段。显式运动查询提供画面平面证据；加 `--save` 才保存测量。Agent 也可用 `annotate` 保存注明来源的解释。这些功能需要 [standalone 0.2.2 CLI](docs/cli-install.md)，下载见 [CLI Release](https://github.com/Lechoung-J/Reelpack-release/releases/tag/v0.2.2)。现有 App 仍为 0.2.0。
+
 ---
 
 ## 你大概是这样找到它的

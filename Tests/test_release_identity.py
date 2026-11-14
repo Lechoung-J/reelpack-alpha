@@ -26,11 +26,18 @@ class ReleaseIdentityTests(unittest.TestCase):
         version = (ROOT/'VERSION').read_text().strip()
         for name in ['README.md', 'README.zh-CN.md']:
             text = (ROOT/name).read_text()
-            self.assertIn(f'releases/download/v{version}', text)
-            self.assertIn(f'--version v{version} --public-release', text)
-            self.assertIn(f'--archive Reelpack-{version}-arm64.zip', text)
+            self.assertIn('releases/download/v0.2.0', text)
+            self.assertIn('--version v0.2.0 --public-release', text)
+            self.assertIn('--archive Reelpack-0.2.0-arm64.zip', text)
             self.assertIn('shasum -a 256 -c install.sh.sha256', text)
+            self.assertIn(f'releases/tag/v{version}', text)
+            self.assertIn('docs/cli-install.md', text)
             self.assertEqual(text.count('```') % 2, 0)
+        instructions = (ROOT/'docs/cli-install.md').read_text()
+        self.assertIn(f'releases/download/v{version}', instructions)
+        self.assertIn(f'--archive Reelpack-CLI-{version}-arm64.zip', instructions)
+        self.assertIn('shasum -a 256 -c install-cli.sh.sha256', instructions)
+        self.assertNotIn('/releases/latest', instructions)
 
 
 if __name__ == '__main__': unittest.main()

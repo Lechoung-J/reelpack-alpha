@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 import agent_entry
+import runtime_environment
 
 
 class AgentEntryTests(unittest.TestCase):
@@ -79,6 +80,89 @@ class AgentEntryTests(unittest.TestCase):
         with patch.object(agent_entry, 'native_cli', return_value=executable), \
              patch.object(agent_entry.subprocess, 'call', return_value=0) as launch:
             self.assertEqual(agent_entry.main(arguments), 0)
+        self.assertEqual(launch.call_args.args[0], [str(executable), *arguments])
+
+    def _dev_tree(self):
+        dev = (self.root / 'dev').resolve()
+        core = dev / 'Core'
+        core.mkdir(parents=True)
+        (core / 'agent_entry.py').write_text('')
+        return dev, core
+
+    def _native_for(self, core, machine='arm64'):
+        with patch.object(agent_entry, '__file__', str(core / 'agent_entry.py')), \
+             patch.object(agent_entry.platform, 'machine', return_value=machine):
+            return agent_entry.native_cli()
+
+    @staticmethod
+    def _write_binary(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'synthetic binary')
+
+    def test_installed_app_lookup_is_strict_and_ignores_development_builds(self):
+        contents = (self.root / 'Reelpack.app/Contents').resolve()
+        core = contents / 'Resources/Core'
+        core.mkdir(parents=True)
+        (core / 'agent_entry.py').write_text('')
+        # A development binary must not be used as a fallback for an app bundle.
+        self._write_binary(contents / 'Resources/.build/debug/reelpack-cli')
+        with patch.object(agent_entry, '__file__', str(core / 'agent_entry.py')):
+            with self.assertRaisesRegex(FileNotFoundError, '安装包中缺少'):
+                agent_entry.native_cli()
+            executable = contents / 'MacOS/reelpack-cli'
+            self._write_binary(executable)
+            self.assertEqual(agent_entry.native_cli(), executable)
+
+    def test_development_alias_layouts_are_discovered_release_before_debug(self):
+        dev, core = self._dev_tree()
+        debug = dev / '.build/debug/reelpack-cli'
+        self._write_binary(debug)
+        self.assertEqual(self._native_for(core), debug)
+
+        release = dev / '.build/release/reelpack-cli'
+        self._write_binary(release)
+        self.assertEqual(self._native_for(core), release)
+
+    def test_legacy_architecture_layouts_still_work_and_release_precedes_debug(self):
+        dev, core = self._dev_tree()
+        legacy = dev / '.build/arm64-apple-macosx/release/reelpack-cli'
+        self._write_binary(legacy)
+        self.assertEqual(self._native_for(core, machine='arm64'), legacy)
+
+        # With no architecture release build, an alias release build still wins
+        # over an architecture debug build.
+        legacy.unlink()
+        arch_debug = dev / '.build/arm64-apple-macosx/debug/reelpack-cli'
+        self._write_binary(arch_debug)
+        alias_release = dev / '.build/release/reelpack-cli'
+        self._write_binary(alias_release)
+        self.assertEqual(self._native_for(core, machine='arm64'), alias_release)
+
+        alias_release.unlink()
+        self.assertEqual(self._native_for(core, machine='arm64'), arch_debug)
+
+    def test_missing_development_binary_is_a_lookup_failure(self):
+        _, core = self._dev_tree()
+        with self.assertRaisesRegex(FileNotFoundError, '未找到 reelpack-cli'):
+            self._native_for(core)
+
+    def test_lookup_failure_and_downstream_failure_are_distinct(self):
+        arguments = ['/local/video.mp4', '--profile', 'talk']
+        stderr = io.StringIO()
+        with patch.object(runtime_environment, 'prepare_pipeline_environment', return_value={}), \
+             patch.object(agent_entry, 'native_cli', side_effect=FileNotFoundError('not built')), \
+             patch.object(agent_entry.subprocess, 'call') as launch, \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(agent_entry.main(arguments), 2)
+        launch.assert_not_called()
+        self.assertIn('not built', stderr.getvalue())
+
+        executable = Path('/synthetic/reelpack-cli')
+        with patch.object(runtime_environment, 'prepare_pipeline_environment', return_value={}), \
+             patch.object(agent_entry, 'native_cli', return_value=executable), \
+             patch.object(agent_entry.subprocess, 'call', return_value=7) as launch:
+            self.assertEqual(agent_entry.main(arguments), 7)
+        launch.assert_called_once()
         self.assertEqual(launch.call_args.args[0], [str(executable), *arguments])
 
 

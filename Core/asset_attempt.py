@@ -103,6 +103,7 @@ class AssetAttempt:
             self._check(self.package_dir)
             self.package_dir.mkdir(parents=True)
             _atomic_json_write(self._check(self.package_dir / "asset.json"), copy.deepcopy(asset))
+            self._preserve_supplements()
             self._active = True
             self._manifest("in_progress")
             return self
@@ -111,6 +112,37 @@ class AssetAttempt:
             self._lock_fd = None
             os.close(fd)
             raise
+
+    def _preserve_supplements(self):
+        """Carry existing supplement bytes into the staged package.
+
+        A successful reanalysis exchanges the whole package directory, so
+        without this copy the immutable supplement history would disappear.
+        Only the supplement directory is carried: old transcript, frames and
+        evidence are deliberately not copied into the new analysis.  Bytes are
+        copied verbatim so each document keeps its original source-analysis
+        digest and becomes ``stale`` rather than being relabelled.
+        """
+        source = self.canonical_dir / "supplements"
+        if not source.exists():
+            return
+        self._check(source)
+        if not source.is_dir():
+            raise AssetStoreError("Supplement path is not a directory")
+        destination = self._check(self.package_dir / "supplements")
+        destination.mkdir()
+        for entry in sorted(source.iterdir(), key=lambda path: path.name):
+            if entry.name.startswith("."):
+                # Private temporary residue from an interrupted publication is
+                # not a published supplement and is never promoted.
+                continue
+            self._check(entry)
+            if not entry.is_file():
+                raise AssetStoreError(f"Supplement entry is not a regular file: {entry.name}")
+            if Path(entry.name).name != entry.name or ".." in Path(entry.name).parts:
+                raise AssetStoreError(f"Unsafe supplement file name: {entry.name}")
+            shutil.copyfile(entry, self._check(destination / entry.name))
+        self._check(destination, tree=True)
 
     def _read_json(self, path):
         self._check(path)

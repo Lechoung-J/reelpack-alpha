@@ -8,25 +8,59 @@
 
 ## 命令不存在时：先安装官方发行物
 
-若 `reelpack` 或上方安装器生成的绝对入口不存在，先访问官方 Release：https://github.com/Lechoung-J/Reelpack-release/releases 。本 Skill 对应产品 0.2.0 / tag v0.2.0；安装包与校验文件见 Releases，历史版本保持可下载；不要把机器上的开发构建当作官方发行物。
+本 Skill 对应 standalone CLI **0.2.2**。先用安装器打印的绝对命令运行 `--version`。需要下述预览、说话人、运动或补充文档能力时，请安装 [v0.2.2 CLI](https://github.com/Lechoung-J/Reelpack-release/releases/tag/v0.2.2)。现有 App 下载仍为 0.2.0。不要用旧 App 安装器获取新 CLI 功能。
 
-从同一个可访问的官方版本获取 `install.sh`、`install.sh.sha256`、`Reelpack-0.2.0-arm64.zip`、ZIP 的 `.sha256` 与 `release-manifest.json`；保存阅读脚本并核验两个校验文件：
+从同一版本下载 `install-cli.sh`、`install-cli.sh.sha256`、`Reelpack-CLI-0.2.2-arm64.zip` 和 ZIP 的 `.sha256`。保存并阅读脚本，核验后运行：
 
 ```bash
-shasum -a 256 -c install.sh.sha256
-shasum -a 256 -c Reelpack-0.2.0-arm64.zip.sha256
-bash install.sh --archive Reelpack-0.2.0-arm64.zip --manifest release-manifest.json --no-launch
+shasum -a 256 -c install-cli.sh.sha256
+shasum -a 256 -c Reelpack-CLI-0.2.2-arm64.zip.sha256
+bash install-cli.sh --archive Reelpack-CLI-0.2.2-arm64.zip --sha256 Reelpack-CLI-0.2.2-arm64.zip.sha256
+"$HOME/.local/share/reelpack-cli/bin/reelpack" --version
+"$HOME/.local/share/reelpack-cli/bin/reelpack" --runtime-check
 ```
 
-不要将本机开发构建混作官方版本，不用 `curl | bash`。已有 App 升级须显式 `--replace-app`，依赖修复另用 `--repair-env`；安装器会备份未改的托管 Skill，用户自定义内容保留并提示迁移。`--no-agent-register` 会跳过用户级命令与技能接入，但 runtime/bin/reelpack 仍可用。使用安装器打印的实际入口运行 `--runtime-check`；快检为只读元数据，模型推理未验证。Whisper 权重缺失先说明约 3.1 GB 成本，显式准备，不静默下载。确认依赖/模型要求后再执行用户的视频任务，安装完成后新开会话加载技能。
+安装器会校验归档和逐文件清单，准备独立的 Python 3.12 CLI 环境。它保留 App、旧环境、媒体和资产库。已验证归属的托管命令与 Skill 可备份升级；自定义内容保留。DSH、Claude Code、Codex、Cursor 的已有目录可接入。`--no-agent-register` 跳过用户级接入，prefix 下的绝对命令仍可用。完整下载、只读复用环境和回滚命令见 [CLI 安装说明](docs/cli-install.md)。安装后新开 Agent 会话。
+
+`--runtime-check` 只检查运行条件，不证明模型推理成功。Whisper 权重缺失时，先说明 large-v3 约 3.1 GB，再显式准备。`--speakers auto` 还需要本地 CAM++ 模型。安装器不另行下载模型；缺少可选模型时，应读取实际状态，别声称能力已运行。
 
 ## 怎么调
 ```bash
 reelpack "<本地视频文件>" --output-dir ~/Reelpack
+reelpack preview "<本地视频文件>" --output "<库外新目录>" --frames 16   # 分析前先看整片
+reelpack "<本地视频文件>" --output-dir ~/Reelpack --profile talk         # 看过预览后显式选画像
 reelpack query --output-dir ~/Reelpack "..."     # 查询已有资产库
 ```
 - 输入**必须是本地文件**（.mp4/.mov/.mkv）。
 - 产出：资产包（`analysis.json` / `analysis.md` / 证据帧 / 分镜板）。
+- 默认保持 `--profile auto`、`--speakers off`、`--rewrite off`、摘要交由 Agent；显式选择才改变行为。
+
+### 先预览、再选画像、再分析
+
+分析前不需要 ASR、导入或模型：
+
+```bash
+reelpack preview "/本地/视频 路径.mp4" --output "/tmp/reelpack-preview" --frames 16
+```
+
+`preview` 只解码这一条本地视频，写 `preview-board.jpg` 与 `preview.json` 到指定新目录；输出目录必须非空可用且不与源视频/资产库重叠。返回 JSON 里有 `source`（实际媒体路径/大小）、`frames[]`（时间戳/序号）、`grid`（行列/瓦片尺寸/实际帧数）、`status` 和 `board.path`。它**不分类内容、不调用模型、不联网、不选画像、不创建资产库**。先打开帧板与 `preview.json`，确认画面里是口播、访谈、播客还是快节奏广告，再决定是否指定画像：
+
+| 画像 | 含义（只影响 OCR 粗扫/加密采样） |
+|---|---|
+| `auto`（默认） | 保持旧行为；不声明内容类别 |
+| `ad` | 快节奏广告：10 秒粗扫 + 字幕带变化触发 |
+| `talk` | 口播/对话：30 秒粗扫 + 触发 |
+| `podcast` | 长播客：60 秒粗扫 + 触发 |
+
+画面判断由你（Agent）做，不要用引擎阈值假装语义分类。画像参与运行签名：同一文件换一个显式画像会重新分析，不会复用旧 OCR 结果。0.2.2 使用新的流水线签名，首次分析会重算旧版本结果；同版本默认 `auto` 可复用成功缓存。
+
+分析示例：
+
+```bash
+reelpack "/本地/视频 路径.mp4" --output-dir ~/Reelpack --profile talk
+```
+
+分析完成后读取返回的资产包，再按「已有证据 → 判断缺口 → 补取」循环使用下方 `frames` / `review`。
 
 ## v0.2.0 文字读取与整理
 
@@ -85,7 +119,118 @@ agent-reach 这类能力，可以形成很顺的组合：
 - 原文必须留痕：整理稿与原始转录并列给出，任何改动可回看；别只给整理版。
 - 不确定就别改：没把握的词保留原样或标注「疑为 XX」，不硬改、不编。
 
-② 别只看转录——要看画面
+② 谁在说——命名与绑定（仅当包里有可靠的说话人分离时）
+
+说话人分离是实验性能力，默认关闭。开启后引擎只给**声音聚类编号**：`analysis.json` 的
+`speakers.segments[]` 每段带 `{start, end, speaker: "S1"/"S2", text}`，`speakers.status`
+说明这一步是否完成。它**不猜名字**，也不判断谁在画面里——命名与绑定由你（Agent）完成。
+
+**四个层次，别混在一起**
+
+1. **匿名声音层（引擎给）**：`S1`/`S2` 只是声学相似的相对编号，不是身份；换一条片子，S1 可能是另一个人。不要改写成姓名。
+2. **声音→画面人物（Agent 绑定）**：把某个声音编号对应到画面中的人物/位置，依据是同一时间段的人脸、机位与镜头变化。这是推断，不是引擎输出。
+3. **画面人物→姓名或角色（Agent 命名）**：把画面人物对应到真名、疑似真名，或「主持人/嘉宾」这类角色标签。角色标签也必须写依据。
+4. **最终称谓**：只有命名层有可靠来源时才用真名；否则用「发言人 A/B」或 `ambiguous`。
+
+声音聚类 `S1/S2`、声音到人物的绑定、人物到姓名/角色的命名是**三件不同的事**，任何一层都不能自动推出下一层。当前身份关联仍由 Agent 完成、不是自动引擎能力；引擎不会自动认人，也不会自动识别主持人/嘉宾姓名。你的绑定/命名可以用 `reelpack annotate` 存成带来源的补充文档（见下方接口），它仍只是 Agent 解释，不会改成 `analysis.json` 或 `speakers` 的引擎事实。
+
+**命名证据优先级**（从高到低）
+
+1. **L3 人名条**：OCR 条目落在画面下 1/3（`ocr.items[].region_norm.y` 约 ≥ 0.67），
+   常见形态是「姓名 · 身份」；同一位置跨镜头重复出现更可信。`region_norm` 为 `null` 时
+   不要硬套位置规则，回证据帧看；字幕带触发的包里坐标相对下部裁切，要结合证据帧和
+   `ocr.sampling.band` 判断，别把字幕当人名条。
+2. **口播自我介绍**：转录里的「我是 X」「我叫 X」「大家好，我是……」。先按上下文纠正明显错字，
+   再和 OCR 人名交叉核对；简繁或同音变体可视为同一人，但要在依据里写明。
+3. **页面元数据**：标题、账号名、简介、发布者等来源信息。包内只有文件名时不算。
+
+判断规则：
+
+- **≥2 类证据一致 → 用真名**（例：L3 人名条 + 自我介绍）。
+- **只有单一证据 → 标「疑似：X」**，并在同一行或脚注写依据。
+- **没有任何证据 → 先问用户**「这位说话人是谁？」，不要自己编。
+- **用户也不知道 → 用「发言人 A/B」**，并显式标注「逻辑命名，非真实身份」。
+- 真名、疑似、逻辑命名三种措辞不要混用；不要在正文里把机器字段 `S1`/`S2` 直接当人名。
+
+**绑定与按需补证据：由你（Agent）决定**
+
+按「已有证据 → 判断缺口 → 向引擎补取 → 再判断」循环执行：
+
+1. **先看已有内容**：全局帧板、镜头证据、匿名说话人时间线、转录、OCR 与已有来源说明。判断画面是固定双人同框、单人特写、反应镜头还是空镜；分别记录「画面里有哪些人」与「这一段是谁在说」。
+2. **证据够用就回答**：结合自我介绍、人名条、上下文、人物位置与镜头变化判断。位置只作为同一镜头内的锚点，换镜头后重新核对；声音簇到画面人物、画面人物到姓名是两种不同推断，都要说明依据。
+3. **证据不够就按需取帧**：由你选择具体时间段、时间点、采样间隔及清晰度。先查询已有帧；仍不足时才请引擎从原片补取。可以选一小段连续帧核对口部动作，或只取一张清晰帧读人名条。没有固定三帧配额、可见度百分比、必须双人同框/特写的硬性要求，也不要求用静态张嘴证明口型同步；补帧密度完全由你按证据缺口决定，普通补帧不需要用户反复确认。
+4. **读回结果再判断**：每次实际查看补取的图片与时间戳，只有仍有必要时才继续加密或提高清晰度。单张张嘴、点头或人物出现都只是线索；稀疏静态帧不能证明口型与声音同步。补帧不能补出缺失的姓名来源，媒体离线也不能假装已核对。
+5. **仍不确定才标注或询问**：在现有能力与合理范围内补证后，仍不能绑定就写 `ambiguous`，说明缺什么；需要用户提供身份信息时再询问。无来源支持的真名继续使用逻辑命名。
+
+出镜重叠比例只能作辅助统计，**不能作为自动决定身份绑定或画外音的固定阈值，也不要求达到任何可见度百分比**。固定双人同框时两人均出镜，不能据此绑定或直接宣布做不到；单人特写也可能是听者反应镜头。一个人未在当前帧里出现，只能说明这张帧未见其人；判断整段画外音需更多证据。
+
+**已安装的按需证据接口**
+
+以下命令由已安装的 `reelpack` Python 入口直接转发，`<库根>` 指包含 `packages/` 的资产库（默认 `~/Downloads/Reelpack/library`）。它们不会重新跑 ASR、加载模型或创建新库；缺库/缺资产/非法范围会显式失败（退出码 2）。
+
+```bash
+# 先查看该时间范围已有的证据帧；不从原片新增帧。
+reelpack frames <asset_id> --start 10 --end 13 --view overview --grid 9 --library-root <库根>
+# montage 是同义命令，按镜头取已有帧：
+reelpack montage <asset_id> --shot <shot_id> --library-root <库根>
+
+# 需要更清楚的指定时间点时，从归档原片按需提取；读取返回结果中的 source/绝对路径确认是否成功。
+reelpack frames <asset_id> --start 10 --end 13 --view detail --timestamp 11.2 --full-res --library-root <库根>
+
+# 需要连续帧时回查一个小区间。此接口还会导出该段音频并尝试 OCR；输出须为库外新目录。
+reelpack review <asset_id> --start 10 --end 13 --interval 0.25 --padding 0 --output "<库外新目录>" --library-root <库根>
+
+# 显式测量一个时间范围的画面运动（平移/缩放/旋转证据）；--start/--end 必填。
+reelpack motion <asset_id> --start 10 --end 12 --sample-fps 8 --library-root <库根>
+# 需要保留这次测量时加 --save（写入不可变引擎测量补充文档，不改 analysis.json）：
+reelpack motion <asset_id> --start 10 --end 12 --save --library-root <库根>
+
+# 把你的身份/角色推断写成带来源的 Agent 注释；输入是 JSON 文件，不运行分类器。
+reelpack annotate <asset_id> --input "<注释 JSON 路径>" --library-root <库根>
+
+# 读回全部补充文档及其 current/stale/unknown 关系；--id 读单条原文。
+reelpack supplements <asset_id> --library-root <库根>
+reelpack supplements <asset_id> --id <supplement_id> --library-root <库根>
+```
+
+`frames --view overview` 只拼已有图片，调大 `--grid` 不会增加时间采样；返回 `pages[]` 与 `frames[]`，请实际打开 `absolute_path` 指向的图片再判断。`detail`（可加 `--full-res`）返回 `source`（`proxy` 或 `original`）、`resolution` 与实际路径；原片不可用时会回退到代理帧，不能把回退结果当作原片清晰帧。`review` 返回 `items[]` 的逐项状态、时间戳和图片路径，并在 `--output` 写 `review.json` / `review.txt` / `audio.wav`；OCR 或某帧失败时按逐项状态说明，不把整个回查报告成成功。普通补证复用已有转录和说话人结果，不需要重跑整条分析。
+
+`motion` 只测你明确给出的有限区间，不会自动扫整片；已保存镜头会作为切点边界传给测量模块，不跨已知切点取帧对。没有可用的已保存镜头时，结果明确写 `cuts.status: "unavailable"` 并给原因，不会编造切点。输出是**画面平面证据**：`vx` 正表示画面内容向右移动，不能当作相机物理运动、焦距、景深或人物身份。离线媒体、非法范围和失败都有结构化状态，不要当成「静止」。
+
+`annotate` 接收 `reelpack.agent-annotations` v1 JSON，支持 `voice_person` / `person_identity` / `person_role` 三类断言。每条断言必须写 `status`（`supported` / `tentative` / `ambiguous` / `unknown`）、`reasoning`、`uncertainty` 和证据引用；`voice_person` 的 `speaker` 必须是当前分析里已有的 `S` 编号，`value` 必须为 `null`；真名/角色只有在 `supported` 或 `tentative` 时才能写非空 `value`。`source_text` 只作为你提供的来源文字保存，引擎不会打开或联网读取它。`supplements` 返回的 `relationship.status` 若为 `stale`，说明该注释针对旧分析保存，引用不会自动映射到新分析；不要把它当 current 证据使用，必要时基于新分析重新注释。
+
+补证循环固定为：**已有证据 → 判断缺口 → 选时间范围/间隔/清晰度 → 取帧/回查/测运动 → 实际读结果 → 推断或标注不确定**。证据密度、范围与分辨率由你决定，引擎不设固定配额。身份绑定仍停留在 Agent 层，不是自动身份识别能力；补充文档只是保存你的推断与来源，不是自动身份识别。
+
+**输出模板：谁说了什么**
+
+在回答里给一条时间线，至少包含**时间戳 + 说话人 + 摘要**；不确定处标 `?`：
+
+```
+谁说了什么（speakers.status=complete；S1/S2 为引擎声音编号）
+- 00:00–00:08  [S1 = 真名 / 疑似：X / 发言人 A]  摘要
+- 00:10–00:17  [S2 = 疑似：X]                    摘要
+- 00:20–00:26  [S2?]                             归属不确定（依据：…）
+- 00:50–00:56  [S2 = 疑似：X · 画外音]           空镜，无人在画面
+```
+
+- 摘要用整理后的可读表述，不要照抄含错字的原文；原始转录仍按上文要求保留并可回查。
+- 每个 `?` 后面或脚注写清不确定的是什么：时间边界、说话人归属，还是名字本身。
+- 分离置信度低（例如固定 k、`speakers.confidence.silhouette` 偏低）时，要说明
+  「编号只是相对聚类，不是身份」，不要把 `S1`/`S2` 写成确定的人。
+
+**禁止**
+
+- 不臆断真名：没有 L3 / 自我介绍 / 元数据证据，就不给名字。
+- 不把逻辑命名当身份：`S1`、`S2`、发言人 A/B 都只是工作标签。
+- 不上传音频：不要为了识别说话人把音频（或可还原人声的片段）发到外部服务。
+
+**降级：没有可靠的说话人分离时**
+
+包内没有 `speakers`，或 `speakers.status != "complete"`（`not_run` / `failed` / `partial`）时，
+**只说内容、不说谁**：按时间线给「说了什么」，可以注明「未做说话人分离」或「结果不完整」；
+不要用 `S1`/`S2`、不要猜名字，也不要从字幕样式或画面同框倒推身份。
+
+③ 别只看转录——要看画面
 
 - 先读「画面文字」章节（标题 / 贴片 / Slogan / 数据卡 / 水印），再按需读证据帧。
 - 短视频和广告大量关键信息在画面上，只听口播会漏一半意思。

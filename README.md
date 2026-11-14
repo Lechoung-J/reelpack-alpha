@@ -106,6 +106,8 @@ No more dragging the timeline hunting for the moment — you get one, two, three
 
 > Case: a twenty-minute editing tutorial. What you end up with isn't "watched it" — it's a step list with timecodes.
 
+For interviews and podcasts, your Agent can associate voices with people using screenshot evidence, then request extra frames or a short review when evidence is missing. Explicit motion queries provide image-plane evidence; add `--save` to preserve a measurement, or use `annotate` to save an attributed Agent interpretation. These features require the [standalone 0.2.2 CLI](docs/cli-install.md); see the [CLI release](https://github.com/Lechoung-J/Reelpack-release/releases/tag/v0.2.2). The downloadable App remains 0.2.0.
+
 ---
 
 ## You probably found us like this
